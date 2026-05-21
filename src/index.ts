@@ -17,7 +17,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://claude.ai,https
 // ── Origin validation (required by Anthropic security standards) ─────────────
 
 function isAllowedOrigin(origin: string | undefined): boolean {
-  if (!origin) return false
+  if (!origin) return true  // Desktop clients (Claude Desktop, mcp-remote) send no Origin
   return ALLOWED_ORIGINS.some(allowed => origin.startsWith(allowed.trim()))
 }
 

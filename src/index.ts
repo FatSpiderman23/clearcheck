@@ -1,3 +1,4 @@
+import 'dotenv/config'
 import express, { Request, Response } from 'express'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -106,8 +107,14 @@ async function getSanctionsList(): Promise<SanctionsEntry[]> {
 
 function normName(s: string) { return s.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim() }
 function sanctionsMatch(q: string, e: SanctionsEntry) {
-  const nq = normName(q)
-  return [e.name, ...e.aliases].map(normName).some(n => n.includes(nq) || nq.includes(n))
+  const qTokens = normName(q).split(' ').filter(t => t.length >= 2)
+  if (!qTokens.length) return false
+  return [e.name, ...e.aliases].some(n => {
+    const nTokens = normName(n).split(' ').filter(t => t.length >= 2)
+    return qTokens.every(qt =>
+      nTokens.some(nt => nt === qt || (nt.length >= 3 && qt.length >= 3 && (nt.startsWith(qt) || qt.startsWith(nt))))
+    )
+  })
 }
 
 // ── Companies House ──────────────────────────────────────────────────────────

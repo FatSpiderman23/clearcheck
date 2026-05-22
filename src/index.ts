@@ -4,6 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { z } from 'zod'
 import axios from 'axios'
+import crypto from 'crypto'
 
 const PORT = parseInt(process.env.PORT || '3000')
 const CH_API_KEY = process.env.COMPANIES_HOUSE_API_KEY || ''
@@ -13,6 +14,10 @@ const POLAR_ACCESS_TOKEN = process.env.POLAR_ACCESS_TOKEN || ''
 const POLAR_ORG_ID = process.env.POLAR_ORG_ID || ''
 const REVIEWER_KEY = process.env.REVIEWER_KEY || ''
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://claude.ai,https://api.anthropic.com').split(',')
+// Stable JWT secret: use env var or derive from REVIEWER_KEY so tokens survive restarts
+const JWT_SECRET = process.env.JWT_SECRET ||
+  crypto.createHash('sha256').update('clearcheck-' + (REVIEWER_KEY || 'default')).digest('hex')
+const BASE_URL = (process.env.BASE_URL || 'https://clearcheck.onrender.com').replace(/\/$/, '')
 
 // ── Origin validation (required by Anthropic security standards) ─────────────
 
@@ -36,6 +41,74 @@ async function validateLicenceKey(key: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+// ── OAuth 2.0 ─────────────────────────────────────────────────────────────────
+
+function b64url(buf: Buffer): string { return buf.toString('base64url') }
+
+function signJWT(payload: Record<string, unknown>, expiresInSec: number): string {
+  const hdr = b64url(Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })))
+  const now = Math.floor(Date.now() / 1000)
+  const bdy = b64url(Buffer.from(JSON.stringify({ ...payload, iat: now, exp: now + expiresInSec })))
+  const sig = b64url(crypto.createHmac('sha256', JWT_SECRET).update(`${hdr}.${bdy}`).digest())
+  return `${hdr}.${bdy}.${sig}`
+}
+
+function verifyJWT(token: string): Record<string, unknown> | null {
+  try {
+    const parts = token.split('.')
+    if (parts.length !== 3) return null
+    const [hdr, bdy, sig] = parts
+    const sigBuf = Buffer.from(sig, 'base64url')
+    const expectedBuf = crypto.createHmac('sha256', JWT_SECRET).update(`${hdr}.${bdy}`).digest()
+    if (sigBuf.length !== expectedBuf.length) return null
+    if (!crypto.timingSafeEqual(sigBuf, expectedBuf)) return null
+    const payload = JSON.parse(Buffer.from(bdy, 'base64url').toString()) as Record<string, unknown>
+    if (typeof payload.exp === 'number' && payload.exp < Math.floor(Date.now() / 1000)) return null
+    return payload
+  } catch {
+    return null
+  }
+}
+
+function verifyPKCE(verifier: string, challenge: string, method: string): boolean {
+  if (method === 'plain') {
+    if (verifier.length !== challenge.length) return false
+    return crypto.timingSafeEqual(Buffer.from(verifier), Buffer.from(challenge))
+  }
+  if (method === 'S256') {
+    const computed = b64url(crypto.createHash('sha256').update(verifier).digest())
+    if (computed.length !== challenge.length) return false
+    return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(challenge))
+  }
+  return false
+}
+
+interface AuthCodeData {
+  licenceKey: string
+  clientId: string
+  redirectUri: string
+  codeChallenge?: string
+  codeChallengeMethod?: string
+  expiresAt: number
+}
+const authCodes = new Map<string, AuthCodeData>()
+setInterval(() => { const n = Date.now(); for (const [k, v] of authCodes) if (v.expiresAt < n) authCodes.delete(k) }, 60_000)
+
+async function validateToken(token: string): Promise<boolean> {
+  if (!token) return false
+  if (REVIEWER_KEY && token === REVIEWER_KEY) return true  // backward compat for Claude Desktop
+  const payload = verifyJWT(token)
+  return payload !== null && typeof payload.sub === 'string' && payload.sub.length > 0
+}
+
+function authorizeHTML(opts: {
+  clientId: string; redirectUri: string; state: string
+  codeChallenge: string; codeChallengeMethod: string; error?: string
+}): string {
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ClearCheck — Connect</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f1624;color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh}.card{background:#1a2744;border:1px solid #1e3a5f;border-radius:16px;padding:40px;max-width:420px;width:90%}.logo{display:flex;align-items:center;gap:10px;margin-bottom:24px}.logo img{width:40px;height:40px;border-radius:8px}.logo span{font-size:22px;font-weight:700}h1{font-size:20px;font-weight:600;margin-bottom:8px}p{color:#94a3b8;font-size:14px;margin-bottom:24px;line-height:1.5}label{display:block;font-size:13px;font-weight:600;color:#94a3b8;margin-bottom:6px}input[type=password]{width:100%;background:#0f1624;border:1px solid #1e3a5f;border-radius:8px;padding:12px 14px;color:#fff;font-size:14px;outline:none;transition:border-color .2s}input[type=password]:focus{border-color:#22c55e}button{width:100%;background:#22c55e;color:#000;border:none;border-radius:8px;padding:14px;font-size:15px;font-weight:700;cursor:pointer;margin-top:16px;transition:background .2s}button:hover{background:#16a34a}.err{color:#f87171;font-size:13px;margin-top:12px;padding:10px;background:rgba(248,113,113,.1);border-radius:6px}.sub{color:#64748b;font-size:12px;margin-top:20px;text-align:center}a{color:#22c55e}</style></head><body><div class="card"><div class="logo"><img src="/public/favicon.png" alt="ClearCheck"><span>ClearCheck</span></div><h1>Connect to Claude</h1><p>Enter your ClearCheck licence key to grant Claude access to UK AML compliance tools.</p><form method="POST"><input type="hidden" name="client_id" value="${esc(opts.clientId)}"><input type="hidden" name="redirect_uri" value="${esc(opts.redirectUri)}"><input type="hidden" name="state" value="${esc(opts.state)}"><input type="hidden" name="code_challenge" value="${esc(opts.codeChallenge)}"><input type="hidden" name="code_challenge_method" value="${esc(opts.codeChallengeMethod)}"><label for="key">Licence Key</label><input id="key" name="key" type="password" placeholder="clearcheck-..." required autofocus>${opts.error ? `<div class="err">${esc(opts.error)}</div>` : ''}<button type="submit">Connect →</button></form><p class="sub">No licence key? <a href="https://clearcheck-uk.github.io/clearcheck" target="_blank">Get access →</a></p></div></body></html>`
 }
 
 // ── Sanctions list (cached 24 hours) ─────────────────────────────────────────
@@ -462,6 +535,7 @@ function buildServer() {
 
 const app = express()
 app.use(express.json())
+app.use(express.urlencoded({ extended: false }))
 app.use('/public', express.static('public'))
 
 app.get('/favicon.ico', (_req, res) => res.redirect('/public/favicon.png'))
@@ -471,22 +545,119 @@ app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', service: 'clearcheck-mcp', version: '1.0.0' })
 })
 
+// ── OAuth 2.0 endpoints ───────────────────────────────────────────────────────
+
+app.get('/.well-known/oauth-authorization-server', (_req, res) => {
+  res.json({
+    issuer: BASE_URL,
+    authorization_endpoint: `${BASE_URL}/authorize`,
+    token_endpoint: `${BASE_URL}/token`,
+    registration_endpoint: `${BASE_URL}/register`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code'],
+    code_challenge_methods_supported: ['S256', 'plain'],
+    token_endpoint_auth_methods_supported: ['none'],
+    scopes_supported: ['mcp'],
+  })
+})
+
+// Dynamic client registration (RFC 7591)
+app.post('/register', (req: Request, res: Response) => {
+  const clientId = crypto.randomBytes(16).toString('hex')
+  res.status(201).json({
+    client_id: clientId,
+    client_secret_expires_at: 0,
+    redirect_uris: (req.body as any).redirect_uris || [],
+    grant_types: ['authorization_code'],
+    response_types: ['code'],
+    token_endpoint_auth_method: 'none',
+  })
+})
+
+// Authorization — show form
+app.get('/authorize', (req: Request, res: Response) => {
+  const q = req.query as Record<string, string>
+  if (q.response_type !== 'code' || !q.redirect_uri) {
+    res.status(400).send('Invalid request: response_type must be "code" and redirect_uri is required')
+    return
+  }
+  res.send(authorizeHTML({
+    clientId: q.client_id || '',
+    redirectUri: q.redirect_uri,
+    state: q.state || '',
+    codeChallenge: q.code_challenge || '',
+    codeChallengeMethod: q.code_challenge_method || 'S256',
+  }))
+})
+
+// Authorization — submit form
+app.post('/authorize', async (req: Request, res: Response) => {
+  const b = req.body as Record<string, string>
+  const { client_id = '', redirect_uri = '', state = '', code_challenge = '', code_challenge_method = 'S256', key = '' } = b
+  if (!redirect_uri) { res.status(400).send('Missing redirect_uri'); return }
+
+  const valid = await validateLicenceKey(key)
+  if (!valid) {
+    res.send(authorizeHTML({
+      clientId: client_id, redirectUri: redirect_uri, state,
+      codeChallenge: code_challenge, codeChallengeMethod: code_challenge_method,
+      error: 'Invalid licence key. Get access at clearcheck-uk.github.io/clearcheck',
+    }))
+    return
+  }
+
+  const code = crypto.randomBytes(24).toString('hex')
+  authCodes.set(code, {
+    licenceKey: key, clientId: client_id, redirectUri: redirect_uri,
+    codeChallenge: code_challenge || undefined, codeChallengeMethod: code_challenge_method || undefined,
+    expiresAt: Date.now() + 600_000,  // 10 minutes
+  })
+  const params = new URLSearchParams({ code, ...(state ? { state } : {}) })
+  res.redirect(`${redirect_uri}?${params}`)
+})
+
+// Token exchange
+app.post('/token', async (req: Request, res: Response) => {
+  const b = req.body as Record<string, string>
+  const { grant_type, code, redirect_uri, code_verifier } = b
+
+  if (grant_type !== 'authorization_code' || !code) {
+    res.status(400).json({ error: 'unsupported_grant_type' }); return
+  }
+  const entry = authCodes.get(code)
+  if (!entry || entry.expiresAt < Date.now()) {
+    authCodes.delete(code)
+    res.status(400).json({ error: 'invalid_grant' }); return
+  }
+  if (entry.redirectUri !== redirect_uri) {
+    res.status(400).json({ error: 'invalid_grant' }); return
+  }
+  if (entry.codeChallenge && entry.codeChallengeMethod) {
+    if (!code_verifier || !verifyPKCE(code_verifier, entry.codeChallenge, entry.codeChallengeMethod)) {
+      res.status(400).json({ error: 'invalid_grant' }); return
+    }
+  }
+  authCodes.delete(code)
+  const accessToken = signJWT({ sub: entry.licenceKey }, 60 * 60 * 24 * 30)  // 30 days
+  res.json({ access_token: accessToken, token_type: 'bearer', expires_in: 60 * 60 * 24 * 30 })
+})
+
+// ── MCP handler ───────────────────────────────────────────────────────────────
+
 async function mcpHandler(req: Request, res: Response) {
-  // Origin validation — prevent DNS rebinding attacks
   const origin = req.headers.origin
   if (req.method !== 'DELETE' && !isAllowedOrigin(origin)) {
     res.status(403).json({ error: 'Origin not allowed' })
     return
   }
 
-  // Licence key validation
   const authHeader = req.headers.authorization || ''
-  const licenceKey = authHeader.replace('Bearer ', '').trim()
-  const valid = await validateLicenceKey(licenceKey)
+  const token = authHeader.replace('Bearer ', '').trim()
+  const valid = await validateToken(token)
   if (!valid) {
     res.status(401).json({
-      error: 'Invalid or missing licence key.',
-      subscribe: 'https://polar.sh/clearcheck',
+      error: 'Invalid or missing access token.',
+      info: 'Connect at clearcheck-uk.github.io/clearcheck',
     })
     return
   }

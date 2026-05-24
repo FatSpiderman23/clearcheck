@@ -618,7 +618,7 @@ app.post('/authorize', async (req: Request, res: Response) => {
 
 // Token exchange
 app.post('/token', async (req: Request, res: Response) => {
-  const b = req.body as Record<string, string>
+  const b = (req.body ?? {}) as Record<string, string>
   const { grant_type, code, redirect_uri, code_verifier } = b
 
   if (grant_type !== 'authorization_code' || !code) {

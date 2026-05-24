@@ -31,24 +31,23 @@ Quick sanctions check on Vladimir Petrov
 
 | Tool | Description |
 |---|---|
-| `client_cdd` | Full CDD report — sanctions + Companies House + FCA + risk summary |
+| `client_cdd` | Full CDD report — sanctions + PEP + Companies House + risk rating |
 | `sanctions_screen` | UK sanctions list check (FCDO, all regimes) |
+| `pep_check` | Politically Exposed Person screen via UK Parliament register |
 | `company_check` | Companies House profile, officers, PSCs |
-| `fca_check` | FCA Financial Services Register lookup |
+| `fca_check` | FCA Financial Services Register lookup by FRN |
 
 ## Setup
 
-1. Subscribe at [polar.sh/clearcheck](https://polar.sh/clearcheck) to get your licence key
+1. Get a licence key at [clearcheck-uk.github.io/clearcheck](https://clearcheck-uk.github.io/clearcheck)
 2. Add to Claude Desktop config:
 
 ```json
 {
   "mcpServers": {
     "clearcheck": {
-      "url": "https://clearcheck-mcp.railway.app/mcp",
-      "headers": {
-        "Authorization": "Bearer YOUR_LICENCE_KEY"
-      }
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://clearcheck.onrender.com/mcp", "--header", "Authorization:Bearer YOUR_LICENCE_KEY"]
     }
   }
 }
@@ -79,4 +78,4 @@ See [PRIVACY.md](./PRIVACY.md)
 
 ## Support
 
-mcp-review@clearcheck.co.uk
+traveltaxdesk@gmail.com
